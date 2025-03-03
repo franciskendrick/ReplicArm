@@ -46,7 +46,7 @@ def main():
                 
                 if reference_distance > 0:
                     normalized_distance = calculate_distance((thumb_tip[1], thumb_tip[2]), (middle_finger_tip[1], middle_finger_tip[2])) / reference_distance
-                    mapped_distance = map_value(normalized_distance, 0.1, 1.5, 10, 100)
+                    mapped_distance = map_value(normalized_distance, 0.1, 1.5, 0, 100)
                 else:
                     mapped_distance = 0
                 
