@@ -1,72 +1,82 @@
 import cv2
 import mediapipe as mp
-import math
-from cvfpscalc import CvFpsCalc
 import controller
 
+mp_draw = mp.solutions.drawing_utils
+mp_hand = mp.solutions.hands
+hands = mp_hand.Hands(min_detection_confidence=0.7, min_tracking_confidence=0.5, max_num_hands=1)
+video = cv2.VideoCapture(0)
 
-def calculate_distance(point1, point2):
-    return math.sqrt((point1[0] - point2[0])**2 + (point1[1] - point2[1])**2)
+FRAME_CENTER_X = int(video.get(3) / 2)
+FRAME_CENTER_Y = int(video.get(4) / 2)
 
+# Servo mappings
+SERVO_LATERAL = 1  # Z-axis rotation (1st Servo)
+SERVO_VERTICAL_1 = 2  # X-axis rotation (2nd Servo)
+SERVO_VERTICAL_2 = 3  # X-axis rotation (3rd Servo)
+SERVO_VERTICAL_3 = 5  # X-axis rotation (5th Servo, with camera)
 
-def map_value(value, from_low, from_high, to_low, to_high):
-    mapped = (value - from_low) * (to_high - to_low) / (from_high - from_low) + to_low
-    mapped = max(to_low, min(to_high, mapped))  # Ensure value stays within bounds
-    return round(mapped / 10) * 10  # Round to nearest multiple of 10
+# Initial servo positions
+servo_angles = {
+    SERVO_LATERAL: 90,
+    SERVO_VERTICAL_1: 90,
+    SERVO_VERTICAL_2: 90,
+    4: 90,
+    SERVO_VERTICAL_3: 90,
+    6: 90,
+    7: 90
+}
 
+# Sensitivity controls
+sensitivity = 250  # Higher = slower movement
 
-def main():
-    mp_draw = mp.solutions.drawing_utils
-    mp_hand = mp.solutions.hands
-    hands = mp_hand.Hands(min_detection_confidence=0.7, min_tracking_confidence=0.5, max_num_hands=1)
-    video = cv2.VideoCapture(0)
-    cvFpsCalc = CvFpsCalc(buffer_len=20)
+while True:
+    ret, image = video.read()
+    if not ret:
+        break
     
-    while True:
-        fps = cvFpsCalc.get()
-        ret, image = video.read()
-        image = cv2.flip(image, 1)
-        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        results = hands.process(image_rgb)
-        
-        if results.multi_hand_landmarks:
-            hand_landmark = results.multi_hand_landmarks[0]  # Only process one hand
-            lmList = [[id, int(lm.x * image.shape[1]), int(lm.y * image.shape[0])] for id, lm in enumerate(hand_landmark.landmark)]
-            
-            mp_draw.draw_landmarks(image, hand_landmark, mp_hand.HAND_CONNECTIONS)
-            
-            if lmList:
-                thumb_tip = lmList[4]
-                middle_finger_tip = lmList[12]
-                wrist = lmList[0]
-                index_mcp = lmList[5]
-                
-                # Use wrist to index MCP as a reference for normalization
-                reference_distance = calculate_distance((wrist[1], wrist[2]), (index_mcp[1], index_mcp[2]))
-                
-                if reference_distance > 0:
-                    normalized_distance = calculate_distance((thumb_tip[1], thumb_tip[2]), (middle_finger_tip[1], middle_finger_tip[2])) / reference_distance
-                    mapped_distance = map_value(normalized_distance, 0.1, 1.5, 0, 100)
-                else:
-                    mapped_distance = 0
-                
-                # Draw a green line between the thumb tip and middle finger tip
-                cv2.line(image, (thumb_tip[1], thumb_tip[2]), (middle_finger_tip[1], middle_finger_tip[2]), (0, 255, 0), 2)
-                
-                cv2.putText(image, f"Angle: {mapped_distance}", (10, 60), cv2.FONT_HERSHEY_COMPLEX, 1, (100, 255, 100), 2, cv2.LINE_AA)
-                
-                # Send mapped distance to controller
-                controller.set_servo_angle(mapped_distance)
-        
-        cv2.putText(image, f"FPS: {fps}", (10, 30), cv2.FONT_HERSHEY_COMPLEX, 1, (255, 100, 100), 2, cv2.LINE_AA)
-        cv2.imshow("Frame", image)
-        if cv2.waitKey(1) == 27:
-            break
+    image = cv2.flip(image, 1)
+    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    results = hands.process(image_rgb)
     
-    video.release()
-    cv2.destroyAllWindows()
-    controller.cleanup()
+    # Draw center point
+    cv2.circle(image, (FRAME_CENTER_X, FRAME_CENTER_Y), 5, (0, 0, 255), -1)
 
+    if results.multi_hand_landmarks:
+        hand_landmark = results.multi_hand_landmarks[0]
+        lmList = [[id, int(lm.x * image.shape[1]), int(lm.y * image.shape[0])] for id, lm in enumerate(hand_landmark.landmark)]
+        
+        mp_draw.draw_landmarks(image, hand_landmark, mp_hand.HAND_CONNECTIONS)
+        
+        if lmList:
+            hand_x, hand_y = lmList[9][1], lmList[9][2]  # Landmark 9 (MCP of index finger)
 
-if __name__ == "__main__":
-    main()
+            # Calculate offsets
+            lateral_offset = (FRAME_CENTER_X - hand_x) / sensitivity  # Reversed direction
+            vertical_offset = (hand_y - FRAME_CENTER_Y) / sensitivity
+
+            # Adjust servos dynamically
+            servo_angles[SERVO_LATERAL] -= lateral_offset
+            servo_angles[SERVO_VERTICAL_1] -= vertical_offset
+            servo_angles[SERVO_VERTICAL_2] -= vertical_offset
+            servo_angles[SERVO_VERTICAL_3] -= vertical_offset
+
+            # Clamp angles between 0 and 180
+            for servo in servo_angles:
+                servo_angles[servo] = max(0, min(180, servo_angles[servo]))
+
+            # Send updated angles to servos
+            for servo, angle in servo_angles.items():
+                controller.set_servo_angle(servo, angle)
+
+            # Display debug info
+            cv2.putText(image, f"Lateral: {servo_angles[SERVO_LATERAL]:.1f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+            cv2.putText(image, f"Vertical: {servo_angles[SERVO_VERTICAL_1]:.1f}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+    
+    cv2.imshow("Frame", image)
+    if cv2.waitKey(1) == 27:  # Press 'Esc' to exit
+        break
+    
+video.release()
+cv2.destroyAllWindows()
+controller.cleanup()
